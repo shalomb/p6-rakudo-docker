@@ -1,0 +1,40 @@
+#!/bin/bash
+
+set -eu
+set -xv
+
+while getopts 'f:u:' opt; do
+  case "$opt" in
+    u) rakudo_url="$OPTARG"
+      ;;
+    f) force="$OPTARG"
+      ;;
+  esac
+done
+shift $((OPTIND -1))
+
+: ${rakudo_url:=http://rakudo.org/downloads/star/rakudo-star-latest.tar.gz}
+[[ -n ${1-} ]] && { rakudo_url="${1-}"; shift; }
+: ${force:=0}
+
+( cd /usr/src
+  mkdir -p /usr/src/rakudo
+
+  url="$rakudo_url"
+  tarball="${url##*/}"
+
+  [[ -n $force ]] && rm -f "$tarball"
+
+  [[ ! -e $tarball ]] &&
+    wget "$url" -O "$tarball"
+
+  tar xzf "$tarball" --strip-components=1 -C /usr/src/rakudo
+
+  ( cd /usr/src/rakudo
+    perl Configure.pl --optimize --prefix=/usr --gen-moar
+    make install
+  )
+
+  rm -rf "$tarball" /usr/src/rakudo
+)
+

@@ -1,0 +1,182 @@
+#!/bin/bash
+
+set -eu
+set -xv
+
+build_config_file="$1"
+script_command="$0 $@"
+script_path=$(readlink -f "$0")
+script_name="${script_path##*/}"
+script_dir="${script_path%/*}"
+
+# exec &> >(
+#   set +xv
+#   while read -r line; do
+#     date --rfc-3339=sec | tr -d '\n'
+#     echo " $HOSTNAME [$script_name]: $line"
+#   done
+# )
+
+
+build_config_file="$script_dir/$build_config_file"
+if [[ -e  $build_config_file ]]; then
+  source "$build_config_file"
+else
+  echo "No build config (${build_config_file-}) file specified/found." >&2
+  exit 3
+fi
+
+export DEBIAN_FRONTEND=noninteractive
+
+{ 
+  cat <<EOF
+Acquire::CompressionTypes::Order     { "xz"; "bz2"; "lzma"; "gz"; };
+Acquire::ftp::Timeout                "10";
+Acquire::GzipIndexes                 "true";
+Acquire::http::Timeout               "10";
+Acquire::Languages                   "none";
+APT::AutoRemove::RecommendsImportant "false";
+Apt::AutoRemove::SuggestsImportant   "false";
+APT::Default-Release                 "$debian_release";
+APT::Get::List-Cleanup               "true";
+APT::Install-Recommends              "0";
+APT::Install-Suggests                "0";
+APT::List-Cleanup                    "true";
+Dir::Ignore-Files-Silently::         "(\.(save|list_)|_)$";
+EOF
+} > /etc/apt/apt.conf.d/container-tweaks
+
+function is_installed {
+  local cmd="$1"
+  type -P "$cmd" &>/dev/null
+}
+
+function nonfatal {
+  ("$@") || true
+  return 0
+}
+
+function retry {
+  local times="$1"; shift
+  local try=0
+  while :; do
+    ("$@") && break; ec=$?
+    (( ++try >= times )) && return "$ec"
+  done
+}
+
+retry 2 apt-get -y update
+retry 2 apt-get -y upgrade
+
+retry 2 apt-get --no-install-recommends install -y \
+  base-files      \
+  bash            \
+  bash-completion \
+  ca-certificates \
+  curl            \
+  gcc             \
+  git             \
+  git-core        \
+  libc6-dev       \
+  libencode-perl  \
+  libreadline-dev \
+  locales         \
+  make            \
+  openssh-client  \
+  procps          \
+  sudo            \
+  wget
+
+retry 2 apt-get -y install
+
+if ! is_installed perl6 ||
+   ! perl6 -v | grep -iq "Rakudo version $rakudo_version "; then
+  rakudo-install -u "$rakudo_url" -f "${force:-0}"
+fi
+
+if ! is_installed zef ; then
+  zef-install -f "${force:-0}"
+  ln -sf /usr/share/perl6/bin/* /usr/local/bin/
+fi
+
+# Fail-early tests
+( set -xv
+  perl6 -c
+  zef info zef
+) >&2
+
+zef install   \
+  CSV::Parser \
+  JSON::Fast  \
+  Readline    \
+  zef         \
+  Terminal::ANSIColor
+
+nonfatal retry 2 apt-get purge -y --auto-remove --ignore-missing \
+  gcc             \
+  libc6-dev       \
+  make
+
+retry 2 apt-get autoremove -y
+retry 2 apt-get autoclean -y
+retry 2 apt-get clean
+
+nonfatal rm -rf /var/lib/apt/lists/*
+
+function nonempty {
+  local target="$1"
+  tmpfile=$(mktemp)
+  cat -> "$tmpfile"
+  test -s "$tmpfile" && mv "$tmpfile" "$target"
+  rm -fv "$tmpfile"
+}
+
+# populate /etc/timezone
+if [[ -n $timezone ]]; then
+  echo "$timezone" > /etc/timezone
+else
+( nonfatal retry 2 curl -A "Mozilla/5.0 Gecko/20100101 Firefox/52.0" \
+       -fsSL 'http://ip-api.com/json' |
+    grep -Eio '"timezone":"[^"]+"' |
+    awk -F'"' '{print $4}' > >(nonempty /etc/timezone)
+  )
+fi
+
+# Generate locales
+sed -i                   \
+  -e 's/^# en_US/en_US/' \
+  -e 's/^# en_GB/en_GB/' \
+  /etc/locale.gen
+grep -vi '^#' /etc/locale.gen
+dpkg-reconfigure -plow locales
+
+# have bash ignore ctrl-d/eof
+echo 'set -o ignoreeof' >> /etc/bash.bashrc
+
+# Create USER "$user_login" and set the password to "$user_login"
+
+getent group  $user_login ||
+  groupadd $user_login \
+           -r -g $user_uid 
+
+getent passwd $user_login ||
+  useradd  $user_login      \
+           -c $user_gecos   \
+           -d $user_homedir \
+           -g $user_login   \
+           -m               \
+           -r               \
+           -s $user_shell   \
+           -u $user_uid 
+
+echo "$user_login:$user_login" | chpasswd
+echo "$user_login ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/$user_login
+chmod 0400 /etc/sudoers.d/$user_login
+
+# Create ~/.ssh directory to allow mounting the user's ~/.ssh directory on run
+mkdir -p  $user_homedir/.ssh/
+chmod 700 $user_homedir/.ssh/
+nonfatal cp -av ~root/.ssh/* $user_homedir/.ssh/
+nonfatal chmod u+rw $user_homedir/.ssh/*
+chown -R $user_login:$user_login $user_homedir/
+

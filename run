@@ -1,0 +1,27 @@
+#!/bin/bash
+
+set -eu
+
+AUTH_SOCK_DIR=$(dirname "$SSH_AUTH_SOCK")
+GID=$(id -g $USER)
+
+docker run \
+  --attach stdin  \
+  --attach stdout \
+  --attach stderr \
+  --env SSH_AGENT_PID="$SSH_AGENT_PID" \
+  --env SSH_AUTH_SOCK="$SSH_AUTH_SOCK" \
+  --env USER="$USER"  \
+  --hostname "$HOSTNAME" \
+  --interactive          \
+  --pid=host             \
+  --rm                   \
+  --tty                  \
+  --user $UID:$GID       \
+  --volume $AUTH_SOCK_DIR:$AUTH_SOCK_DIR  \
+  --volume /etc/group:/etc/group     \
+  --volume /etc/passwd:/etc/passwd   \
+  --volume ~/:$HOME                  \
+  --workdir "$PWD"                   \
+  "$@"
+

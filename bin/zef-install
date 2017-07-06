@@ -1,0 +1,61 @@
+#!/bin/bash
+
+set -eu
+
+system_install=1
+while getopts 'f:lrt:v:u' opt; do
+  case "$opt" in
+    f) force="$OPTARG"
+      ;;
+    l) list_tags=1
+      ;;
+    r) refresh=1
+      ;;
+    t) tag="$OPTARG"
+      ;;
+    u) system_install=0
+      ;;
+    U) upgrade=1
+      ;;
+    v) tag="$OPTARG"
+      ;;
+  esac
+done
+shift $((OPTIND -1))
+
+: ${force:-0}
+: ${install_to:=perl}
+: ${list_tags:=0}
+: ${refresh:=0}
+: ${system_install:=1}
+: ${tag:=master}
+: ${upgrade:=0}
+: ${zef_workspace:=/usr/src/zef}
+(( system_install != 1 )) && zef_workspace="$HOME/projects/zef"
+(( system_install != 1 )) && install_to='home'
+
+if (( upgrade == 1 )); then
+  zef install zef --force-install
+fi
+
+if [[ ! -e $zef_workspace ]]; then
+  git clone https://github.com/ugexe/zef.git "$zef_workspace"
+fi
+
+( cd "$zef_workspace"
+
+  (( refresh == 1 )) &&
+    git pull
+
+  if (( list_tags == 1 )); then
+    git tag -n
+    exit;
+  fi
+
+  [[ -n $tag ]] &&
+    git checkout "$tag"
+
+  git log -5 --pretty=format:"%h - %an, %ar : %s" | cat; echo;
+  perl6 -Ilib bin/zef install --install-to="$install_to" .
+)
+

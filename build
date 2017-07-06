@@ -1,0 +1,120 @@
+#!/bin/bash
+
+set -eu
+set -a
+
+while getopts 'd:f:n:r:t:v:' opt; do
+  case "$opt" in
+    d) debian_release="$OPTARG"
+      ;;
+    f) parent_image="$OPTARG"
+      ;;
+    n) image_name="$OPTARG"
+      ;;
+    r) requested_rakudo="$OPTARG"
+      ;;
+    t) image_tag="$OPTARG"
+      ;;
+    v) requested_version="$OPTARG"
+      ;;
+  esac
+done
+shift $((OPTIND -1))
+
+: ${requested_rakudo:=rakudo}
+: ${requested_version:=latest}
+
+if [[ $requested_rakudo = *star* ]]; then
+  rakudo_url="http://rakudo.org/downloads/star/rakudo-star-${requested_version}.tar.gz"
+else
+  rakudo_url="http://rakudo.org/downloads/rakudo/rakudo-${requested_version}.tar.gz"
+fi
+
+function url_headers {
+  local url="$1"
+  curl -fsSLI "$url"
+}
+
+function get_redirect_url {
+  local url="$1"
+  local headers="$2"
+  new_location=$(
+    awk '/Location:/ { print $2 }' <<<"$headers" |
+      tr -d '\r' | tail -n 1
+  )
+  if [[ -n ${new_location-} ]]; then
+    path="${url#http://*/}"
+    echo "${url%/$path}/$new_location"
+  fi
+}
+
+url_headers=$( url_headers "$rakudo_url" )
+if grep -iq 'HTTP/1.1 30[12378]' <<<"$url_headers"; then
+  new_url=$( get_redirect_url "$rakudo_url" "$url_headers" )
+  if [[ ${new_url-} ]]; then
+    rakudo_url="$new_url"
+  fi
+fi
+
+set -a
+
+: ${debian_release:=$(lsb_release -s -c)}
+: ${maintainer:=$(git config user.name) <$(git config user.email)>}
+: ${parent_image:=debian:$debian_release}
+: ${timezone:=$(< /etc/timezone)}
+: ${username:=${USER:-$(id -un)}}
+
+build_host=$( hostname -f )
+build_time=$( date --rfc-3339=sec | tr -cd '0-9' )
+rakudo_tarball="${rakudo_url##*/}"
+rakudo_version="${rakudo_tarball%.tar.gz}"
+rakudo_type="${rakudo_version%-2*}"
+rakudo_type="${rakudo_type%-latest*}"
+rakudo_version="${rakudo_version#$rakudo_type-}"
+: ${image_name:=$username/$rakudo_type}
+
+IFS=':' read -r -a user_passwd < <(getent passwd "$username")
+user_login="${user_passwd[0]}"
+user_uid="${user_passwd[2]}"
+user_gid="${user_passwd[3]}"
+user_gecos="${user_passwd[4]}"
+user_homedir="${user_passwd[5]}"
+user_shell="${user_passwd[6]}"
+
+: ${image_tag:=$build_time}
+[[ $requested_version != $rakudo_version ]] &&
+  image_tag="$requested_version"
+
+mkdir -p tmp/
+envsubst=$( type -P envsubst | head -n 1 )
+# TODO
+# This envsubst hack is to prevent $PATH from being expanded in the template.
+(PATH='$PATH' "$envsubst") < lib/Dockerfile.tmpl   > tmp/Dockerfile
+
+envsubst < lib/build-config.tmpl > tmp/build-config
+
+cat <<EOF
+build summary
+  build_host ........ : $build_host
+  build_time ........ : $build_time
+  image_name ........ : $image_name
+  image_tag ......... : $rakudo_version
+  requested_rakudo .. : $requested_rakudo
+  requested_version . : $requested_version
+  rakudo_type ....... : $rakudo_type
+  rakudo_url ........ : $rakudo_url
+  rakudo_tarball .... : $rakudo_tarball
+  rakudo_version .... : $rakudo_version
+  parent_image ...... : $parent_image
+  debian_release .... : $debian_release
+  username .......... : $username
+  maintainer ........ : $maintainer
+
+EOF
+
+docker build .  \
+  -f tmp/Dockerfile  \
+  -t "$image_name:$rakudo_version" \
+  -t "$image_name:$build_time"     \
+  -t "$image_name:$image_tag"
+
