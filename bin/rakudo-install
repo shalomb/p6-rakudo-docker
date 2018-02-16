@@ -31,7 +31,7 @@ shift $((OPTIND -1))
   tar xzf "$tarball" --strip-components=1 -C /usr/src/rakudo
 
   ( cd /usr/src/rakudo
-    perl Configure.pl --optimize --prefix=/usr --gen-moar
+    perl Configure.pl --prefix=/usr --backend=moar --gen-moar
     make install
   )
 
